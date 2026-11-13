@@ -1,5 +1,10 @@
+LDLIBS = -lpthread
+ifeq ($(OS),Windows_NT)
+	LDLIBS += -lws2_32
+endif
+
 output: v380.o UtlSocket.o UtlDiscovery.o aes.o FlvStream.o
-	g++ v380.o UtlSocket.o UtlDiscovery.o aes.o FlvStream.o -lpthread -o v380
+	g++ v380.o UtlSocket.o UtlDiscovery.o aes.o FlvStream.o $(LDLIBS) -o v380
 
 v380.o: v380.cpp stdafx.h UtlSemaphore.h
 	g++ -c v380.cpp

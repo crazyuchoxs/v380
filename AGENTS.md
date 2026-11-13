@@ -10,7 +10,8 @@ Repo untuk mengekstrak stream H264 dari kamera V380. Dua implementasi **independ
 
 C++:
 - Linux/macOS: `make -C v380` → menghasilkan `v380/v380` (g++ polos, link `-lpthread`).
-- Windows: build `v380.sln`.
+- Windows: install MinGW-w64 dulu (mis. `winget install BrechtSanders.WinLibs.POSIX.UCRT`), lalu `mingw32-make` di folder `v380/` → menghasilkan `v380/v380.exe`. Makefile sudah menambahkan `-lws2_32` otomatis di Windows (diperlukan untuk WinSock). PATH tidak ter-update sampai shell baru dibuka.
+- Windows tanpa MinGW: build `v380.sln` (VS2015).
 - `v380/v380.xcodeproj` juga ada untuk Xcode.
 
 Node (wajib `cd v380-nodejs` dulu — semua path relatif terhadap cwd):
