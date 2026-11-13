@@ -21,3 +21,10 @@ ipch
 v380/v380
 v380/v380.exe
 *.xcuserstate
+
+# Artefak lokal: skrip probe & hasil stream (memuat IP/kredensial kamera)
+v380/probe_*.ps1
+v380/*.h264
+v380/err.txt
+v380/test_*.txt
+v380/test_*.bin

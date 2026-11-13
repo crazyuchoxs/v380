@@ -30,6 +30,25 @@ Node (wajib `cd v380-nodejs` dulu — semua path relatif terhadap cwd):
 - `npm run dev` (nodemon) **rusak**: nodemon bukan dependency dan tidak ada `nodemon.json`. Gunakan `dev2`.
 - Tidak ada CI maupun pre-commit config.
 
+## Protokol login & stream (hasil reverse-engineering, sudah teruji)
+
+Login (`v380/v380.cpp` sudah mengikuti ini; `v380-nodejs` **belum**):
+
+- `cmd 1167` → respons `1168`, isi: `u1@4 = 120` (layout LAN), `version byte @8 = 31`, `u3@9 = 1`, `deviceId@13`, `username@49`, `password@81`.
+- **Versi byte @8 wajib ≥ 31** untuk firmware ini — nilai 1/2/3/21/30 dibalas `-100` ("unknown command"). `1022` + username@71/password@103 (layout cloud) selalu `1011`.
+- Password field = `randomKey(16 ASCII acak) + AES-128-ECB-noPad(password di-zero-pad ke 48 byte)`, dienkripsi **2×**: dulu key `macrovideo+*#!^@`, lalu randomKey. Encoding pkcs7 (32 byte) juga diterima; tanpa randomKey → `1012`.
+- Kode hasil: `1001` sukses, `1011` username salah, `1012` password salah, `1018` deviceId salah.
+- Respons login = **256 byte**; respons stream login `301` = **tepat 32 byte** (`cmd 401`@0, `result`@4, `version` u16@8, `width`@10, `height`@14, `maxPackSize`@18, `audioFreq`@22, `audioBits`@23, `audioChannels`@24).
+- Stream start `303`: `u32@4` = nilai `result` dari `401` (1001). Pakai `u16 0x3001@4` (seperti referensi lain) **tidak** mengalir di firmware ini.
+- `deviceVersion` (byte@12 respons login) `> 30` → media terenkripsi AES-128-ECB. Key = `ticket(u32 LE) + 0x618123462c14795c(u64 LE) + 0x82800df0(u32 LE)`.
+  Video: **64 dari setiap 80 byte** pertama di-decrypt. Tiap frame = header luar 16 byte (`frameId:4, frameType:2, frameRate:2, timestamp:8`) + payload → buang 16 byte, dekripsi, lalu cari start code `00 00 01` dan selaraskan jadi `00 00 00 01`.
+  FLV butuh header 16 byte itu tetap di depan (dipakai `FlvStream` untuk timestamp) — makanya ada dua jalur keluar (`nframe` untuk stdout, `fframe` untuk FLV).
+
+Gotchas protokol:
+- **TCP bisa memecah header 12 byte** jadi beberapa segmen. `UtlSocket::Recv` hanya sekali `recv()` — baca header/respons wajib di-loop sampai penuh, kalau tidak stream langsung mati (`hdrn=8` → restart terus).
+- Respons dibaca ke `rbuf` terpisah, jangan ke `buf` (request): `vector::resize` membuat pointer `req` jadi dangling.
+- Kredensial kamera (IP, device ID, username, password) **jangan di-commit**. Skrip scratch `v380/probe_*.ps1` dan hasil stream sudah masuk `.gitignore`.
+
 ## Gotchas
 
 - Runtime Node membutuhkan binary `ffmpeg` di PATH (fluent-ffmpeg mem-spawn-nya per request di `stream.ts`).

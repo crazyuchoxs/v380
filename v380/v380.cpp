@@ -12,8 +12,8 @@ struct TCommandReq {
 	int32_t command;   // NEW_USERVERIFY = 1167
 	union {
 		struct {
-			uint32_t unknown1; // 120 = LoginFromServerEX, 1002 = LoginFromMRServerEX, 1022 = our
-			uint8_t unknown2;  // 1, 2=our
+			uint32_t unknown1; // 120 = login LAN (user@49, pw@81); 1022 = layout cloud/domain (user@71, pw@103) -> 1011
+			uint8_t unknown2;  // versi protokol: firmware ini menerima >=31 (2 -> balasan -100)
 			uint32_t unknown3; // 10 = LoginFromServerEX, 11 = LoginFromMRServerEX, 1=our
 			uint32_t deviceId;
 			char hostDateTime[32]; // optional - maybe related to unk1/2, on v380 pc this is a domain name
@@ -148,6 +148,72 @@ void GeneratePassword(std::vector<uint8_t>& output, const std::string& password)
 	memcpy_s(output.data(), output.size(), randomKey.c_str(), nRandomKey);
 	memcpy_s(output.data() + nRandomKey, output.size() - nRandomKey, paddedPassword.data(), paddedPassword.size());
 }
+
+// Dekripsi payload video untuk deviceVersion > 30:
+// 64 dari setiap 80 byte pertama di-AES-ECB-decrypt (sisa 16 byte tidak dienkripsi)
+void DecryptVideoPayload(uint8_t* data, size_t len, const uint8_t* key)
+{
+	AES_ctx ctx;
+	AES_init_ctx(&ctx, key);
+	for (size_t off = 0; off + 64 <= len; off += 80) {
+		for (int i = 0; i < 4; i++) {
+			AES_ECB_decrypt(&ctx, data + off + i * AES_BLOCKLEN);
+		}
+	}
+}
+
+// aesKey media = ticket(u32 LE) + 0x618123462c14795c(u64 LE) + 0x82800df0(u32 LE)
+void GenerateMediaKey(uint8_t key[16], uint32_t ticket)
+{
+	key[0] = (uint8_t)(ticket & 0xff);
+	key[1] = (uint8_t)((ticket >> 8) & 0xff);
+	key[2] = (uint8_t)((ticket >> 16) & 0xff);
+	key[3] = (uint8_t)((ticket >> 24) & 0xff);
+	const uint64_t mid = 0x618123462c14795cULL;
+	for (int i = 0; i < 8; i++) key[4 + i] = (uint8_t)((mid >> (8 * i)) & 0xff);
+	const uint32_t tail = 0x82800df0;
+	key[12] = (uint8_t)(tail & 0xff);
+	key[13] = (uint8_t)((tail >> 8) & 0xff);
+	key[14] = (uint8_t)((tail >> 16) & 0xff);
+	key[15] = (uint8_t)((tail >> 24) & 0xff);
+}
+
+// Siapkan satu frame video:
+//  - out   : Annex-B murni (00 00 00 01 ...) untuk stdout --output=video
+//  - flvOut: header timestamp 16 byte + payload (didekripsi bila perlu) untuk FLV
+void PrepareVideoFrame(const std::vector<uint8_t>& frame, bool needDecrypt, const uint8_t* key,
+	std::vector<uint8_t>& out, std::vector<uint8_t>& flvOut)
+{
+	out.clear();
+	flvOut.clear();
+	if (frame.size() <= 16) return;
+
+	// header luar: frameId:4, frameType:2, frameRate:2, timestamp:8
+	std::vector<uint8_t> payload(frame.begin() + 16, frame.end());
+	if (needDecrypt) {
+		DecryptVideoPayload(payload.data(), payload.size(), key);
+	}
+
+	flvOut.assign(frame.begin(), frame.begin() + 16);
+	flvOut.insert(flvOut.end(), payload.begin(), payload.end());
+
+	out.swap(payload);
+	size_t s = std::string::npos;
+	for (size_t i = 0; i + 2 < out.size(); i++) {
+		if (out[i] == 0 && out[i + 1] == 0 && out[i + 2] == 1) { s = i; break; }
+	}
+	if (s != std::string::npos) {
+		std::vector<uint8_t> tmp;
+		tmp.reserve(out.size() - s + 1);
+		tmp.push_back(0);
+		tmp.insert(tmp.end(), out.begin() + s, out.end());
+		out.swap(tmp);
+	}
+}
+
+// Panjang respons yang dikirim kamera (diukur dari firmware ini)
+const size_t kAuthRespLen = 256;        // respons login 1168
+const size_t kStreamLoginRespLen = 32;  // respons stream login 401
 
 void printHelp(FILE* f)
 {
@@ -326,11 +392,16 @@ int main(int argc, const char* argv[])
 			std::vector<uint8_t> hdr;
 			std::vector<uint8_t> vframe;
 			std::vector<uint8_t> aframe;
+			std::vector<uint8_t> nframe;
+			std::vector<uint8_t> fframe;
+			std::vector<uint8_t> rbuf(512, 0); // buffer khusus respons (mencegah req jadi dangling)
 
 			buf.reserve(500);
 			hdr.reserve(12);
 			vframe.reserve(8192);
 			aframe.reserve(8192);
+			nframe.reserve(8192);
+			fframe.reserve(8192);
 
 			{
 				UtlDiscovery socketDiscovery;
@@ -369,17 +440,26 @@ int main(int argc, const char* argv[])
 
 			req->command = 1167;
 			req->u.login.deviceId = stoi(id);
-			req->u.login.unknown1 = 1022;
-			req->u.login.unknown2 = 2;
+			req->u.login.unknown1 = 120;
+			req->u.login.unknown2 = 31;
 			req->u.login.unknown3 = 1;
 			memcpy_s(req->u.login.username, 32, username.c_str(), username.size());
 			memcpy_s(req->u.login.password, 32, pw.data(), pw.size());
 
 			socketAuth.Send(buf);
-			socketAuth.Recv(buf, 256, 5000);
+			int nAuth = 0;
+			while (nAuth < (int)kAuthRespLen) {
+				int r = socketAuth.Recv(rbuf.data() + nAuth, kAuthRespLen - nAuth, 5000);
+				if (r <= 0) break;
+				nAuth += r;
+			}
 			socketAuth.Close();
 
-			resp = *reinterpret_cast<TLoginResp*>(buf.data());
+			if (nAuth < (int)sizeof(TLoginResp)) {
+				fprintf(stderr, "Login response: expected >= %d bytes, got %d\n", (int)sizeof(TLoginResp), nAuth);
+				continue;
+			}
+			resp = *reinterpret_cast<TLoginResp*>(rbuf.data());
 			if (resp.command == 1168) {
 				if (resp.loginResult == 1001) {
 					//fprintf(stderr, "%x", resp->resultValue);
@@ -395,6 +475,16 @@ int main(int argc, const char* argv[])
 				}
 			}
 
+			if (resp.command != 1168 || resp.loginResult != 1001) {
+				fprintf(stderr, "Login gagal (cmd=%d result=%d)\n", resp.command, resp.loginResult);
+				continue;
+			}
+
+			// deviceVersion > 30 -> stream media terenkripsi AES-128-ECB
+			bool needDecrypt = resp.version > 30;
+			uint8_t mediaKey[16] = { 0 };
+			if (needDecrypt) GenerateMediaKey(mediaKey, resp.authTicket);
+
 			socketStream.Connect(ip, port);
 			socketStream.DisableNagle();
 
@@ -408,12 +498,19 @@ int main(int argc, const char* argv[])
 			req->u.streamLogin_lan.resolution = resolution;
 
 			socketStream.Send(buf);
-			if (socketStream.Recv(buf, 412, 5000) < 16) {
-				fprintf(stderr, "Login response: expected >= 16 bytes\n");
+			int nStream = 0;
+			while (nStream < (int)kStreamLoginRespLen) {
+				int r = socketStream.Recv(rbuf.data() + nStream, kStreamLoginRespLen - nStream, 5000);
+				if (r <= 0) break;
+				nStream += r;
+			}
+
+			if (nStream < (int)sizeof(TStreamLogin301)) {
+				fprintf(stderr, "Login response: expected >= %d bytes, got %d\n", (int)sizeof(TStreamLogin301), nStream);
 				continue;
 			}
 
-			TStreamLogin301 loginResp = *reinterpret_cast<TStreamLogin301*>(buf.data());
+			TStreamLogin301 loginResp = *reinterpret_cast<TStreamLogin301*>(rbuf.data());
 			if (loginResp.command != 401) {
 				fprintf(stderr, "Login response: expected 401, got %d\n", loginResp.command);
 				continue;
@@ -437,8 +534,18 @@ int main(int argc, const char* argv[])
 			}
 
 			bool exitloop = false;
-			while (socketStream.Recv(hdr, 12, 5000) >= 12 && !exitloop)
+			int hdrn = 0;
+			hdr.resize(12);
+			while (!exitloop)
 			{
+				// TCP bisa memecah header 12 byte jadi beberapa segmen - akumulasi dulu
+				hdrn = 0;
+				while (hdrn < 12) {
+					int r = socketStream.Recv(hdr.data() + hdrn, 12 - hdrn, 5000);
+					if (r <= 0) break;
+					hdrn += r;
+				}
+				if (hdrn < 12) break;
 				switch (hdr[0])
 				{
 				case 0x7f:
@@ -448,8 +555,9 @@ int main(int argc, const char* argv[])
 					uint16_t len = *(uint16_t*)&hdr[7];
 					uint8_t type = hdr[1];
 
-					if (len > 500 || !totalFrame || curFrame > totalFrame) {
-						fprintf(stderr, "Sanity check failed, should bail out\n");
+					if (len > 20000 || !totalFrame || curFrame >= totalFrame) {
+						fprintf(stderr, "Sanity check failed (total=%u cur=%u len=%u), restarting\n", totalFrame, curFrame, len);
+						exitloop = true;
 						break;
 					}
 
@@ -466,11 +574,12 @@ int main(int argc, const char* argv[])
 					case 0x00: // I-Frame
 						vframe.insert(vframe.end(), buf.begin(), buf.end());
 						if (curFrame == totalFrame - 1) {
+							PrepareVideoFrame(vframe, needDecrypt, mediaKey, nframe, fframe);
 							if (output_type == 0) {
-								fwrite(vframe.data(), 1, vframe.size(), stdout);
+								fwrite(nframe.data(), 1, nframe.size(), stdout);
 								fflush(stdout);
 							} else if (output_type == 2) {
-								flv.WriteVideo(vframe, true);
+								flv.WriteVideo(fframe, type == 0x00);
 							}
 							vframe.clear();
 						}
@@ -480,11 +589,12 @@ int main(int argc, const char* argv[])
 						// Video
 						vframe.insert(vframe.end(), buf.begin(), buf.end());
 						if (curFrame == totalFrame - 1) {
+							PrepareVideoFrame(vframe, needDecrypt, mediaKey, nframe, fframe);
 							if (output_type == 0) {
-								fwrite(vframe.data(), 1, vframe.size(), stdout);
+								fwrite(nframe.data(), 1, nframe.size(), stdout);
 								fflush(stdout);
 							} else if (output_type == 2) {
-								flv.WriteVideo(vframe, true);
+								flv.WriteVideo(fframe, type == 0x00);
 							}
 							vframe.clear();
 						}
@@ -519,7 +629,9 @@ int main(int argc, const char* argv[])
 					break;
 				default:
 					exitloop = true;
-					fprintf(stderr, "Unknown 0x%02x command\n", hdr[0]);
+					fprintf(stderr, "Unknown 0x%02x command, header:", hdr[0]);
+					for (int i = 0; i < 12; i++) fprintf(stderr, " %02x", hdr[i]);
+					fprintf(stderr, "\n");
 					break;
 				}
 				
