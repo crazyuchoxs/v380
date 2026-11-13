@@ -1,5 +1,9 @@
 {
 	"compilerOptions": {
+		"baseUrl": ".",
+		"paths": {
+			"typebase": ["./node_modules/typebase/typebase.js"]
+		},
 		"module": "commonjs",
 		"target": "es2017",
 		"strict": true,

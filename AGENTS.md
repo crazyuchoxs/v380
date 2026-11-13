@@ -22,6 +22,8 @@ Node (wajib `cd v380-nodejs` dulu — semua path relatif terhadap cwd):
 ## Verifikasi
 
 - `npm run lint` (tslint) lalu `npm run tsc` (typecheck). Urutan: lint → tsc.
+- **Jangan upgrade `typescript` di atas 4.6**: `ts-node@9` crash dengan TS ≥ 4.7 (signature API `resolveTypeReferenceDirective` berubah). Sudah dipin `~4.6.4`.
+- `tsconfig.json` punya `paths` yang memaksa modul `typebase` resolve ke `typebase.js`-nya — tanpa itu, `tsc` ikut meng-typecheck source `.ts` ketat di dalam `node_modules` dan gagal. Jangan dihapus.
 - `npm run tsc` akan gagal jika ada unused local (`noUnusedLocals: true`).
 - `npm test` hanya stub yang exit 1 — **tidak ada test suite** di repo ini (C++ maupun Node). Jangan mencoba menjalankan test.
 - `npm run dev` (nodemon) **rusak**: nodemon bukan dependency dan tidak ada `nodemon.json`. Gunakan `dev2`.
